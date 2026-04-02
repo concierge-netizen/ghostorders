@@ -1,1 +1,5 @@
-{"name":"ghost-order-page","version":"1.0.0","dependencies":{"nodemailer":"^6.9.13"}}
+{
+  "name": "ghost-order-page",
+  "version": "1.0.0",
+  "description": "GHOST Beverage product delivery order form"
+}
