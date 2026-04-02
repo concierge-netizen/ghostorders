@@ -39,20 +39,27 @@ async function mq(query) {
   return data.data;
 }
 
-// ─── Resend email helper ─────────────────────────────────────────────────────
-async function sendEmail(to, subject, html, fromName) {
+// ─── Resend email helper — supports optional attachment ──────────────────────
+async function sendEmail(to, subject, html, fromName, attachment) {
+  const body = {
+    from:    (fromName || 'HANDS Logistics') + ' <concierge@handslogistics.com>',
+    to:      Array.isArray(to) ? to : [to],
+    subject: subject,
+    html:    html
+  };
+  if (attachment) {
+    body.attachments = [{
+      filename: attachment.filename,
+      content:  attachment.content   // base64 string
+    }];
+  }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + RESEND_KEY,
       'Content-Type':  'application/json'
     },
-    body: JSON.stringify({
-      from:    (fromName || 'HANDS Logistics') + ' <concierge@handslogistics.com>',
-      to:      [to],
-      subject: subject,
-      html:    html
-    })
+    body: JSON.stringify(body)
   });
   const data = await res.json();
   if (!res.ok) throw new Error('Resend error: ' + JSON.stringify(data));
@@ -351,17 +358,73 @@ exports.handler = async function(event) {
 
     await mq('mutation { create_update(item_id: ' + itemId + ', body: ' + JSON.stringify(comment) + ') { id } }');
 
-    // ── 5. Send emails via Resend ──────────────────────────────────────────
+    // ── 5. Build QuickBooks Online CSV ─────────────────────────────────────
+    const invoiceNo  = 'GHOST-' + itemId;
+    const today      = new Date();
+    const invDate    = (today.getMonth()+1).toString().padStart(2,'0') + '/' +
+                       today.getDate().toString().padStart(2,'0') + '/' +
+                       today.getFullYear();
+    const dueDate    = (() => {
+      const d = new Date(today); d.setDate(d.getDate() + 30);
+      return (d.getMonth()+1).toString().padStart(2,'0') + '/' +
+             d.getDate().toString().padStart(2,'0') + '/' + d.getFullYear();
+    })();
+
+    function csvEsc(v) {
+      const s = String(v || '');
+      return (s.includes(',') || s.includes('"') || s.includes('\n'))
+        ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+
+    const csvHeader = '*InvoiceNo,*Customer,*InvoiceDate,*DueDate,Terms,Location,Memo,' +
+      '*Item(Product/Service),ItemDescription,*ItemQuantity,*ItemRate,ItemAmount,ServiceDate,Taxable';
+
+    const validLines = lineItems.filter(l => l.sku || l.desc);
+    const csvRows = validLines.map((li, idx) => {
+      const qty = parseFloat(li.qty)   || 0;
+      const prc = parseFloat(li.price) || 0;
+      const amt = qty * prc;
+      return [
+        idx === 0 ? csvEsc(invoiceNo)                      : '',
+        idx === 0 ? csvEsc(account || clientName)           : '',
+        idx === 0 ? invDate                                 : '',
+        idx === 0 ? dueDate                                 : '',
+        idx === 0 ? 'Net 30'                               : '',
+        '',
+        idx === 0 ? csvEsc('HANDS PO #' + itemId + (billingCode ? ' | PO: ' + billingCode : '') + (projectName ? ' | ' + projectName : '') + (deliveryDate ? ' | Delivery: ' + deliveryDate : '')) : '',
+        csvEsc(li.sku || li.desc || 'Product'),
+        csvEsc(li.desc || li.sku || ''),
+        csvEsc(qty),
+        csvEsc(prc.toFixed(2)),
+        csvEsc(amt.toFixed(2)),
+        csvEsc(deliveryDate || invDate),
+        'N'
+      ].join(',');
+    });
+
+    const csvContent = csvHeader + '\n' + csvRows.join('\n');
+    const csvB64     = Buffer.from(csvContent).toString('base64');
+    const csvAttach  = { filename: invoiceNo + '_QBO.csv', content: csvB64 };
+
+    // ── 6. Send emails via Resend ──────────────────────────────────────────
     const clientSubject   = 'Delivery Request Received - ' + (projectName || account) + (deliveryDate ? ' | ' + deliveryDate : '');
     const internalSubject = '[NEW ORDER #' + itemId + '] ' + account + ' - ' + (projectName || '') + (deliveryDate ? ' | ' + deliveryDate : '');
 
     const emailQueue = [];
 
+    // Client confirmation — no CSV
     if (clientEmail) {
       emailQueue.push(sendEmail(clientEmail, clientSubject, clientHTML(d, itemId), 'HANDS Logistics'));
     }
 
-    emailQueue.push(sendEmail(INTERNAL_EMAIL, internalSubject, internalHTML(d, itemId), 'HANDS Logistics'));
+    // Internal team — both Jon and Charles, with QB CSV attached
+    emailQueue.push(sendEmail(
+      ['jon@handslogistics.com', 'charles@handslogistics.com'],
+      internalSubject,
+      internalHTML(d, itemId),
+      'HANDS Logistics',
+      csvAttach
+    ));
 
     await Promise.all(emailQueue);
 
