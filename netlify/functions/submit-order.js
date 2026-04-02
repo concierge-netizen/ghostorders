@@ -4,16 +4,14 @@
 //
 // Required environment variables (set in Netlify → Site config → Environment variables):
 //   MONDAY_TOKEN    — your monday.com API token
-//   GMAIL_USER      — Gmail address to send from (e.g. concierge@handslogistics.com)
-//   GMAIL_PASS      — Gmail App Password (NOT your login password)
-//                     Get one at: myaccount.google.com/apppasswords
+//   RESEND_KEY      — Resend API key (resend.com — free, 100 emails/day)
+//   INTERNAL_EMAIL  — (optional) defaults to concierge@handslogistics.com
 //   INTERNAL_EMAIL  — (optional) defaults to concierge@handslogistics.com
 
-const nodemailer = require('nodemailer');
+// Email via Resend API (resend.com) — free tier, no SMTP needed
 
 const MONDAY_TOKEN    = process.env.MONDAY_TOKEN;
-const GMAIL_USER      = process.env.GMAIL_USER;
-const GMAIL_PASS      = process.env.GMAIL_PASS;
+const RESEND_KEY      = process.env.RESEND_KEY;
 const INTERNAL_EMAIL  = process.env.INTERNAL_EMAIL || 'concierge@handslogistics.com';
 const BOARD_ID        = '4550650855';
 const GROUP_ID        = 'new_group84798';
@@ -41,12 +39,24 @@ async function mq(query) {
   return data.data;
 }
 
-// ─── Gmail transporter ───────────────────────────────────────────────────────
-function mailer() {
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+// ─── Resend email helper ─────────────────────────────────────────────────────
+async function sendEmail(to, subject, html, fromName) {
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + RESEND_KEY,
+      'Content-Type':  'application/json'
+    },
+    body: JSON.stringify({
+      from:    (fromName || 'HANDS Logistics') + ' <onboarding@resend.dev>',
+      to:      [to],
+      subject: subject,
+      html:    html
+    })
   });
+  const data = await res.json();
+  if (!res.ok) throw new Error('Resend error: ' + JSON.stringify(data));
+  return data;
 }
 
 // ─── Shared style constants ──────────────────────────────────────────────────
@@ -341,29 +351,17 @@ exports.handler = async function(event) {
 
     await mq('mutation { create_update(item_id: ' + itemId + ', body: ' + JSON.stringify(comment) + ') { id } }');
 
-    // ── 5. Send emails ─────────────────────────────────────────────────────
-    const transport = mailer();
-
+    // ── 5. Send emails via Resend ──────────────────────────────────────────
     const clientSubject   = 'Delivery Request Received - ' + (projectName || account) + (deliveryDate ? ' | ' + deliveryDate : '');
     const internalSubject = '[NEW ORDER #' + itemId + '] ' + account + ' - ' + (projectName || '') + (deliveryDate ? ' | ' + deliveryDate : '');
 
     const emailQueue = [];
 
     if (clientEmail) {
-      emailQueue.push(transport.sendMail({
-        from:    '"HANDS Logistics" <' + GMAIL_USER + '>',
-        to:      clientEmail,
-        subject: clientSubject,
-        html:    clientHTML(d, itemId)
-      }));
+      emailQueue.push(sendEmail(clientEmail, clientSubject, clientHTML(d, itemId), 'HANDS Logistics'));
     }
 
-    emailQueue.push(transport.sendMail({
-      from:    '"HANDS Logistics" <' + GMAIL_USER + '>',
-      to:      INTERNAL_EMAIL,
-      subject: internalSubject,
-      html:    internalHTML(d, itemId)
-    }));
+    emailQueue.push(sendEmail(INTERNAL_EMAIL, internalSubject, internalHTML(d, itemId), 'HANDS Logistics'));
 
     await Promise.all(emailQueue);
 
