@@ -48,7 +48,7 @@ async function sendEmail(to, subject, html, fromName) {
       'Content-Type':  'application/json'
     },
     body: JSON.stringify({
-      from:    (fromName || 'HANDS Logistics') + ' <onboarding@resend.dev>',
+      from:    (fromName || 'HANDS Logistics') + ' <concierge@handslogistics.com>',
       to:      [to],
       subject: subject,
       html:    html
